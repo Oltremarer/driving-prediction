@@ -1,12 +1,13 @@
-from mmau_train import MMAU_TRAIN
-from torch.utils.data import DataLoader
+import argparse
+import os
+
 import torch
 from torch import nn
-# from model import DrivingRiskPredictor
-from model import LightDrivingRiskPredictor
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-import os
-import json
+
+from mmau_train import MMAU_TRAIN
+from model import LightDrivingRiskPredictor
 
 # def main():
 #     # --- 参数设置 ---
@@ -109,40 +110,58 @@ import json
     #     with open("prediction.json", "w") as f:
     #         json.dump(predictions_dict, f, indent=4)
 
-def main():
-    # --- 参数设置 ---
-    ROOT_PATH = "/home/msi/driving-risk-prediction/MMAU_TRAIN"
-    BATCH_SIZE = 1
-    NUM_WORKERS = 1
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using {DEVICE} device to run.")
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train LightDrivingRiskPredictor.")
+    parser.add_argument("--dataset-root", type=str, default="/home/msi/driving-risk-prediction/MMAU_TRAIN",
+                        help="Path to MMAU_TRAIN root folder.")
+    parser.add_argument("--batch-size", type=int, default=1, help="Training batch size.")
+    parser.add_argument("--num-workers", type=int, default=1, help="Dataloader worker count.")
+    parser.add_argument("--num-epochs", type=int, default=1, help="Total training epochs.")
+    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Optimizer learning rate.")
+    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Directory to save checkpoints.")
+    parser.add_argument("--resume-checkpoint", type=str, default=None,
+                        help="Path to checkpoint to resume from.")
+    parser.add_argument("--save-interval", type=int, default=1,
+                        help="Save checkpoint every N epochs.")
+    parser.add_argument("--max-bbox-n", type=int, default=10,
+                        help="Max number of objects per frame (must match preprocessing).")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Device to use (default: auto detect).")
+    return parser.parse_args()
 
-    # --- Checkpoint相关参数设置 ---
-    CHECKPOINT_DIR = "checkpoints"  # 保存Checkpoint的目录
-    RESUME_CHECKPOINT = None # 如果要从某个checkpoint恢复训练，请指定文件路径, e.g., "./checkpoints/model_epoch_5.pth"
-    SAVE_INTERVAL = 1  # 每隔多少个epoch保存一次
+
+def main():
+    args = parse_args()
+    device = torch.device(args.device) if args.device else torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    print(f"Using {device} device to run.")
 
     # --- 创建保存Checkpoint的目录 ---
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     # --- 创建数据集和加载器 ---
-    train_dataset = MMAU_TRAIN(root_path=ROOT_PATH, phase="train", data_aug=True)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+    train_dataset = MMAU_TRAIN(root_path=args.dataset_root, phase="train", data_aug=True)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     # --- 实例化模型 ---
-    # model = DrivingRiskPredictor(max_bbox_n=10).to(DEVICE)
-    max_bbox_n = 10
-    model = LightDrivingRiskPredictor(max_bbox_n=max_bbox_n).to(DEVICE)
+    model = LightDrivingRiskPredictor(max_bbox_n=args.max_bbox_n).to(device)
 
     # --- 定义损失函数和优化器 ---
     criterion = nn.BCELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     
     # --- 加载Checkpoint (如果存在) ---
     start_epoch = 0
-    if RESUME_CHECKPOINT and os.path.exists(RESUME_CHECKPOINT):
-        print(f"Resuming training from checkpoint: {RESUME_CHECKPOINT}")
-        checkpoint = torch.load(RESUME_CHECKPOINT, map_location=DEVICE)
+    if args.resume_checkpoint and os.path.exists(args.resume_checkpoint):
+        print(f"Resuming training from checkpoint: {args.resume_checkpoint}")
+        checkpoint = torch.load(args.resume_checkpoint, map_location=device)
         
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -153,17 +172,14 @@ def main():
         print("Starting training from scratch.")
 
     # --- 简单的训练示例 ---
-    # num_epochs = 10
-    num_epochs = 1
-    # 修改range以从正确的epoch开始
-    for epoch in range(start_epoch, num_epochs):
+    for epoch in range(start_epoch, args.num_epochs):
         model.train()
         total_loss = 0
         for i, batch in enumerate(train_loader):
             # 将数据移动到GPU
             for key, value in batch.items():
                 if isinstance(value, torch.Tensor):
-                    batch[key] = value.to(DEVICE)
+                    batch[key] = value.to(device)
 
             # 1. 前向传播
             risk_predictions = model(batch)
@@ -187,21 +203,15 @@ def main():
                     # print(f"Sample {j}: accident_frame={accident_frame}, start_ramp_frame={start_ramp_frame}")
 
                     ramp_length = accident_frame - start_ramp_frame
-                    # if accident_frame > start_ramp_frame:
                     if ramp_length > 0:
-                        # ramp = torch.linspace(0, 1, accident_frame - start_ramp_frame).to(DEVICE)
-                        ramp = torch.linspace(0, 1, ramp_length).to(DEVICE)
-                        # target_risk[j, start_ramp_frame:accident_frame] = ramp
+                        ramp = torch.linspace(0, 1, ramp_length).to(device)
 
                         end_frame = min(accident_frame, seq_len)
                         target_slice_length = end_frame - start_ramp_frame
 
-                        if target_slice_length == ramp_length:
-                            target_risk[j, start_ramp_frame:end_frame] = ramp
-                        else:
-                            # 如果不匹配，调整 ramp
-                            adjusted_ramp = torch.linspace(0, 1, target_slice_length).to(DEVICE)
-                            target_risk[j, start_ramp_frame:end_frame] = adjusted_ramp
+                        if target_slice_length != ramp_length:
+                            ramp = torch.linspace(0, 1, target_slice_length).to(device)
+                        target_risk[j, start_ramp_frame:end_frame] = ramp
 
                     target_risk[j, accident_frame:] = 1.0
 
@@ -214,14 +224,14 @@ def main():
             
             total_loss += loss.item()
             if (i+1) % 50 == 0:
-                print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
+                print(f"Epoch [{epoch+1}/{args.num_epochs}], Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
 
         avg_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}] finished. Average Loss: {avg_loss:.4f}")
+        print(f"Epoch [{epoch+1}/{args.num_epochs}] finished. Average Loss: {avg_loss:.4f}")
 
         # --- 保存Checkpoint ---
-        if (epoch + 1) % SAVE_INTERVAL == 0:
-            checkpoint_path = os.path.join(CHECKPOINT_DIR, f"model_epoch_{epoch+1}.pth")
+        if (epoch + 1) % args.save_interval == 0:
+            checkpoint_path = os.path.join(args.checkpoint_dir, f"model_epoch_{epoch+1}.pth")
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),

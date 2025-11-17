@@ -273,16 +273,9 @@ class LightTextEncoder(nn.Module):
 class LightBboxEncoder(nn.Module):
     def __init__(self, max_bbox_n=10, feature_dim=64):
         super().__init__()
-        # self.max_bbox_n = max_bbox_n
-        
-        # self.fc = nn.Sequential(
-        #     nn.Linear(max_bbox_n * 4, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, feature_dim)
-        # )
-
+        input_dim = max_bbox_n * 4
         self.fc = nn.Sequential(
-            nn.Linear(40, 128),
+            nn.Linear(input_dim, 128),
             nn.ReLU(),
             nn.Linear(128, feature_dim)
         )
@@ -303,10 +296,8 @@ class LightDrivingRiskPredictor(nn.Module):
         super().__init__()
         self.vision_encoder = LightVisionEncoder(feature_dim=vision_dim)
         self.text_encoder = LightTextEncoder(feature_dim=text_dim)
-        # self.bbox_encoder = LightBboxEncoder(feature_dim=bbox_dim)
         # 输入维度是 N*4，因为每个框有4个坐标
-        # print(f"max_bbox_n = {max_bbox_n}")
-        self.bbox_encoder = LightBboxEncoder(max_bbox_n==max_bbox_n * 4, feature_dim=bbox_dim)
+        self.bbox_encoder = LightBboxEncoder(max_bbox_n=max_bbox_n, feature_dim=bbox_dim)
         
         # 融合特征维度
         fused_dim = (vision_dim * 2) + text_dim + bbox_dim
